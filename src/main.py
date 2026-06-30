@@ -6,6 +6,46 @@ from models import Ficha
 
 # ==================== FUNÇÕES DE BANCO DE DADOS (CRUD) ====================
 
+def salvar_equipamento(conn, ficha_id, nome_equipamento, bonus_ataque, bonus_defesa, equipamento_id=None):
+    if equipamento_id is None:
+        cursor = conn.execute(
+            '''INSERT INTO equipamento (ficha_id, nome_equipamento, bonus_ataque, bonus_defesa)
+               VALUES (?, ?, ?, ?)''',
+            (ficha_id, nome_equipamento, bonus_ataque, bonus_defesa)
+        )
+        return cursor.lastrowid
+
+    conn.execute(
+        '''UPDATE equipamento
+           SET nome_equipamento=?, bonus_ataque=?, bonus_defesa=?
+           WHERE id=? AND ficha_id=?''',
+        (nome_equipamento, bonus_ataque, bonus_defesa, equipamento_id, ficha_id)
+    )
+    return equipamento_id
+
+
+def listar_equipamentos(conn, ficha_id):
+    cursor = conn.execute(
+        "SELECT id, nome_equipamento, bonus_ataque, bonus_defesa FROM equipamento WHERE ficha_id=? ORDER BY id",
+        (ficha_id,)
+    )
+    return cursor.fetchall()
+
+
+def remover_equipamento(conn, equipamento_id):
+    cursor = conn.execute("DELETE FROM equipamento WHERE id=?", (equipamento_id,))
+    return cursor.rowcount > 0
+
+
+def obter_bonus_equipamentos(conn, ficha_id):
+    cursor = conn.execute(
+        "SELECT COALESCE(SUM(bonus_ataque), 0), COALESCE(SUM(bonus_defesa), 0) FROM equipamento WHERE ficha_id=?",
+        (ficha_id,)
+    )
+    ataque_total, defesa_total = cursor.fetchone()
+    return int(ataque_total or 0), int(defesa_total or 0)
+
+
 def salvar_ficha(entry_jogador, entry_personagem, entry_vida, entry_forca, entry_defesa, janela_cadastro):
     try:
         nome_jogador = entry_jogador.get().strip()
@@ -127,14 +167,11 @@ def abrir_calculadora(root, tree):
     cursor.execute("SELECT * FROM ficha WHERE id=?", (ficha_id,))
     dados = cursor.fetchone()
     ficha = Ficha(dados[1], dados[2], dados[3], dados[5], dados[6], dados[4])
-    
-    cursor.execute("SELECT nome_equipamento, bonus_ataque, bonus_defesa FROM equipamento WHERE ficha_id=?", (ficha_id,))
-    equip_dados = cursor.fetchone()
     conn.close()
 
     calc_janela = tk.Toplevel(root)
     calc_janela.title(f"Calculadora de Combate: {ficha.nome_personagem}")
-    calc_janela.geometry("900x520")
+    calc_janela.geometry("960x560")
     calc_janela.grab_set()
 
     frame_superior = tk.Frame(calc_janela)
@@ -150,32 +187,120 @@ def abrir_calculadora(root, tree):
     tk.Label(col1, text=f"Defesa Base: {ficha.defesa}", font=("Arial", 11)).pack(pady=2)
 
     # ----- COLUNA 2: EQUIPAMENTO -----
-    col2 = tk.LabelFrame(frame_superior, text="2. Equipamento (Arma/Armadura)", width=280)
+    col2 = tk.LabelFrame(frame_superior, text="2. Equipamento (Arma/Armadura)", width=320)
     col2.pack(side="left", fill="both", expand=True, padx=5)
     
     tk.Label(col2, text="Nome do Equipamento:").pack(pady=2)
-    ent_nome_eq = tk.Entry(col2); ent_nome_eq.pack()
+    ent_nome_eq = tk.Entry(col2)
+    ent_nome_eq.pack(fill="x", padx=8)
     tk.Label(col2, text="Bônus de Ataque:").pack(pady=2)
-    ent_atk_eq = tk.Entry(col2); ent_atk_eq.pack()
+    ent_atk_eq = tk.Entry(col2)
+    ent_atk_eq.pack(fill="x", padx=8)
     tk.Label(col2, text="Bônus de Defesa:").pack(pady=2)
-    ent_def_eq = tk.Entry(col2); ent_def_eq.pack()
+    ent_def_eq = tk.Entry(col2)
+    ent_def_eq.pack(fill="x", padx=8)
+    ent_atk_eq.insert(0, "0")
+    ent_def_eq.insert(0, "0")
 
-    if equip_dados:
-        ent_nome_eq.insert(0, equip_dados[0])
-        ent_atk_eq.insert(0, equip_dados[1])
-        ent_def_eq.insert(0, equip_dados[2])
-    else:
-        ent_atk_eq.insert(0, "0"); ent_def_eq.insert(0, "0")
+    equipamento_selecionado_id = None
 
-    def salvar_equipamento():
+    def limpar_formulario_equipamento():
+        nonlocal equipamento_selecionado_id
+        equipamento_selecionado_id = None
+        ent_nome_eq.delete(0, tk.END)
+        ent_atk_eq.delete(0, tk.END)
+        ent_def_eq.delete(0, tk.END)
+        ent_atk_eq.insert(0, "0")
+        ent_def_eq.insert(0, "0")
+        btn_salvar_equipamento.config(text="Salvar Equip")
+
+    def carregar_lista_equipamentos():
+        for item in tree_equipamentos.get_children():
+            tree_equipamentos.delete(item)
+
         conn = get_connection()
-        conn.execute("DELETE FROM equipamento WHERE ficha_id=?", (ficha_id,))
-        conn.execute("INSERT INTO equipamento (ficha_id, nome_equipamento, bonus_ataque, bonus_defesa) VALUES (?, ?, ?, ?)",
-                     (ficha_id, ent_nome_eq.get(), int(ent_atk_eq.get()), int(ent_def_eq.get())))
-        conn.commit(); conn.close()
-        messagebox.showinfo("Sucesso", "Equipamento Salvo!")
+        for equipamento in listar_equipamentos(conn, ficha_id):
+            tree_equipamentos.insert("", tk.END, values=(equipamento[0], equipamento[1], equipamento[2], equipamento[3]))
+        conn.close()
 
-    tk.Button(col2, text="Salvar Equip", command=salvar_equipamento).pack(pady=10)
+    def salvar_equipamento_ui():
+        nome = ent_nome_eq.get().strip()
+        if not nome:
+            messagebox.showwarning("Aviso", "Informe o nome do equipamento.")
+            return
+
+        try:
+            ataque = int(ent_atk_eq.get())
+            defesa = int(ent_def_eq.get())
+        except ValueError:
+            messagebox.showwarning("Aviso", "Os bônus devem ser números inteiros.")
+            return
+
+        conn = get_connection()
+        salvar_equipamento(conn, ficha_id, nome, ataque, defesa, equipamento_selecionado_id)
+        conn.commit()
+        conn.close()
+        limpar_formulario_equipamento()
+        carregar_lista_equipamentos()
+        messagebox.showinfo("Sucesso", "Equipamento salvo!")
+
+    def editar_equipamento_selecionado():
+        nonlocal equipamento_selecionado_id
+        selecao = tree_equipamentos.selection()
+        if not selecao:
+            messagebox.showwarning("Aviso", "Selecione um equipamento para editar.")
+            return
+
+        valores = tree_equipamentos.item(selecao, 'values')
+        equipamento_selecionado_id = int(valores[0])
+        ent_nome_eq.delete(0, tk.END)
+        ent_nome_eq.insert(0, valores[1])
+        ent_atk_eq.delete(0, tk.END)
+        ent_atk_eq.insert(0, valores[2])
+        ent_def_eq.delete(0, tk.END)
+        ent_def_eq.insert(0, valores[3])
+        btn_salvar_equipamento.config(text="Atualizar Equip")
+
+    def remover_equipamento_selecionado():
+        selecao = tree_equipamentos.selection()
+        if not selecao:
+            messagebox.showwarning("Aviso", "Selecione um equipamento para remover.")
+            return
+
+        valores = tree_equipamentos.item(selecao, 'values')
+        equipamento_id = int(valores[0])
+
+        if messagebox.askyesno("Confirmar", f"Deseja remover {valores[1]}?"):
+            conn = get_connection()
+            remover_equipamento(conn, equipamento_id)
+            conn.commit()
+            conn.close()
+            limpar_formulario_equipamento()
+            carregar_lista_equipamentos()
+
+    lista_equipamentos_frame = tk.LabelFrame(col2, text="Equipamentos cadastrados")
+    lista_equipamentos_frame.pack(fill="both", expand=True, pady=(10, 0))
+
+    cols = ("id", "nome", "ataque", "defesa")
+    tree_equipamentos = ttk.Treeview(lista_equipamentos_frame, columns=cols, show="headings", height=5)
+    tree_equipamentos.heading("id", text="ID")
+    tree_equipamentos.heading("nome", text="Nome")
+    tree_equipamentos.heading("ataque", text="Ataque")
+    tree_equipamentos.heading("defesa", text="Defesa")
+    tree_equipamentos.column("id", width=0, stretch=False)
+    tree_equipamentos.column("nome", width=140, anchor="center")
+    tree_equipamentos.column("ataque", width=70, anchor="center")
+    tree_equipamentos.column("defesa", width=70, anchor="center")
+    tree_equipamentos.pack(fill="both", expand=True, padx=5, pady=5)
+
+    botoes_equipamento = tk.Frame(lista_equipamentos_frame)
+    botoes_equipamento.pack(fill="x", padx=5, pady=(0, 5))
+    btn_salvar_equipamento = tk.Button(botoes_equipamento, text="Salvar Equip", command=salvar_equipamento_ui)
+    btn_salvar_equipamento.pack(side="left")
+    tk.Button(botoes_equipamento, text="Editar", command=editar_equipamento_selecionado).pack(side="left", padx=5)
+    tk.Button(botoes_equipamento, text="Excluir", command=remover_equipamento_selecionado).pack(side="left")
+
+    carregar_lista_equipamentos()
 
     # ----- COLUNA 3: BUFFS TEMPORÁRIOS -----
     col3 = tk.LabelFrame(frame_superior, text="3. Buffs Temporários", width=280)
@@ -202,8 +327,12 @@ def abrir_calculadora(root, tree):
     ent_dano_verd = tk.Entry(frame_inferior, width=10); ent_dano_verd.insert(0, "0"); ent_dano_verd.grid(row=0, column=5)
 
     def acao_receber_dano():
+        conn = get_connection()
+        _, bonus_defesa_total = obter_bonus_equipamentos(conn, ficha_id)
+        conn.close()
+
         defesa_original = ficha.defesa
-        ficha.defesa += int(ent_def_eq.get()) 
+        ficha.defesa += bonus_defesa_total
         dano = ficha.calcular_dano_recebido(int(ent_dano_comum.get()), int(ent_dano_magico.get()), int(ent_dano_verd.get()),
                                             int(ent_blindagem.get()), int(ent_prot.get()), int(ent_prot_mag.get()))
         ficha.defesa = defesa_original
@@ -217,7 +346,10 @@ def abrir_calculadora(root, tree):
         messagebox.showinfo("Resultado", f"{ficha.nome_personagem} sofreu {dano} de dano!")
 
     def acao_causar_dano():
-        dano = ficha.calcular_dano_causado(int(ent_atk_eq.get()), int(ent_dano_ext.get()))
+        conn = get_connection()
+        bonus_ataque_total, _ = obter_bonus_equipamentos(conn, ficha_id)
+        conn.close()
+        dano = ficha.calcular_dano_causado(bonus_ataque_total, int(ent_dano_ext.get()))
         messagebox.showinfo("Ataque!", f"{ficha.nome_personagem} causou {dano} de dano!")
 
     # NOVA FUNÇÃO: RECUPERAR VIDA (CURA)
